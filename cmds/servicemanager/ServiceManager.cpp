@@ -498,10 +498,144 @@ Status ServiceManager::addService(const std::string& name, const sp<IBinder>& bi
     return Status::ok();
 }
 
+// --- SPOOF SERVICE LIST DATA (per-brand fake service list; hides custom-ROM/leaks) ---
+#include <sys/system_properties.h>
+#include <algorithm>
+
+// AOSP Common Services
+static const char* const kAospServiceList[] = {
+"accessibility", "account", "activity", "activity_task", "adb",
+"alarm", "android.frameworks.stats.IStats/default", "android.hardware.light.ILights/default", "android.hardware.power.IPower/default", "android.security.apc",
+"android.security.authorization", "android.security.compat", "android.security.identity", "android.security.legacykeystore", "android.security.maintenance",
+"android.security.metrics", "android.service.gatekeeper.IGateKeeperService", "android.system.keystore2.IKeystoreService/default", "android.system.suspend.ISystemSuspend/default", "app_binding",
+"app_hibernation", "app_integrity", "appops", "app_search", "appwidget",
+"attestation_verification", "audio", "auth", "autofill", "backup",
+"battery", "batteryproperties", "batterystats", "binder_calls_stats", "biometric",
+"blob_store", "bluetooth_manager", "bugreport", "cacheinfo", "carrier_config",
+"clipboard", "color_display", "companiondevice", "connectivity", "connectivity_native",
+"connmetrics", "content", "country_detector", "cpuinfo", "crossprofileapps",
+"dataloader_manager", "dbinfo", "device_config", "device_identifiers", "deviceidle",
+"device_policy", "device_state", "devicestoragemonitor", "diskstats", "display",
+"dnsresolver", "DockObserver", "domain_verification", "dreams", "drm.drmManager",
+"dropbox", "dynamic_system", "emergency_affordance", "ethernet", "external_vibrator_service",
+"file_integrity", "fingerprint", "font", "game", "gfxinfo",
+"gpu", "graphicsstats", "hardware_properties", "imms", "incident",
+"incidentcompanion", "incremental", "input", "inputflinger", "input_method",
+"installd", "ions", "iphonesubinfo", "ipsec", "isms",
+"isub", "jobscheduler", "launcherapps", "legacy_permission", "lights",
+"locale", "location", "location_time_zone_manager", "lock_settings", "logcat",
+"looper_stats", "manager", "mdns", "media.audio_flinger", "media.audio_policy",
+"media.camera", "media.camera.proxy", "media_communication", "media.extractor", "media.metrics",
+"media_metrics", "media.player", "media_projection", "media.resource_manager", "media_resource_monitor",
+"media.resource_observer", "media_router", "media_session", "meminfo", "memtrack.proxy",
+"midi", "mount", "nearby", "netd", "netd_listener",
+"netpolicy", "netstats", "network_management", "network_score", "network_stack",
+"network_time_update_service", "network_watchlist", "nfc", "notification", "oem_lock",
+"otadexopt", "overlay", "package", "package_native", "pac_proxy",
+"people", "performance_hint", "permission", "permission_checker", "permissionmgr",
+"persistent_data_block", "phone", "pinner", "platform_compat", "platform_compat_native",
+"power", "powerstats", "print", "processinfo", "procstats",
+"reboot_readiness", "recovery", "resources", "restrictions", "role",
+"rollback", "runtime", "safety_center", "scheduling_policy", "sdk_sandbox",
+"search", "sec_key_att_app_id_provider", "secure_element", "sensor_privacy", "sensorservice",
+"serial", "servicediscovery", "settings", "shortcut", "simphonebook",
+"slice", "soundtrigger", "soundtrigger_middleware", "speech_recognition", "stats",
+"statsbootstrap", "statscompanion", "statsmanager", "statusbar", "storaged",
+"storaged_pri", "storagestats", "SurfaceFlinger", "SurfaceFlingerAIDL", "suspend_control",
+"suspend_control_internal", "system_config", "system_server_dumper", "system_update", "telecom",
+"telephony_ims", "telephony.registry", "testharness", "tethering", "textclassification",
+"textservices", "texttospeech", "thermalservice", "time_detector", "time_zone_detector",
+"tracing.proxy", "transparency", "trust", "uimode", "updatelock",
+"uri_grants", "usagestats", "usb", "user", "vcn_management",
+"vibrator_manager", "virtualdevice", "voiceinteraction", "vold", "vpn_management",
+"wallpaper", "webviewupdate", "wifi", "wifinl80211", "wifip2p",
+"wifiscanner", "window",   
+};
+static const size_t kAospServiceListSize = sizeof(kAospServiceList) / sizeof(kAospServiceList[0]);
+
+// Samsung-specific Services
+static const char* const kSamsungServiceList[] = {
+"adservices_manager", "android.frameworks.cameraservice.service.ICameraService/default", "android.frameworks.location.altitude.IAltitudeService/default", "android.frameworks.sensorservice.ISensorManager/default", "android.frameworks.vibrator.IVibratorControlService/default",
+"android.hardware.media.c2.IComponentStore/software", "android.hardware.vibrator.IVibrator/default", "android.security.samsungattestation", "android.security.samsungpqcoperation", "android.security.securekeygeneration",
+"android.system.net.netd.INetd/default", "AODManagerService", "app_function", "application_policy", "app_prediction",
+"artd", "asks", "background_install_control", "blockchain", "ChimeraManagerService",
+"CocktailBarService", "com.samsung.android.vexfwk.service", "com.samsung.security.fabric.cryptod.IFabricCryptoService/default", "com.samsung.ucs.ucsservice", "content_capture",
+"contextual_search", "cover", "credential", "CustomFrequencyManagerService", "desktopmode",
+"display_aiqe", "DisplaySolution", "dual_app", "ecm_enhanced_confirmation", "econtroller",
+"edmnativehelper", "edm_proxy", "enterprise_license_policy", "enterprise_policy", "epdgService",
+"epic", "euicc_card_controller", "extendedethernetservice", "face", "feature_flags",
+"gamemanager", "grammatical_inflection", "healthconnect", "HqmManagerService", "ImsBase",
+"IntelligentBatterySaverService", "isemphonesubinfo", "isemtelephony", "knoxcustom", "knoxguard_service",
+"knox.mtd", "knox_ucsm_policy", "knox_vpn_policy", "kumiho.decoder", "lazy_service",
+"lifeguard", "mcps", "mdm.remotedesktop", "mDNIe", "media.aaudio",
+"media.camera.worker", "mobile_payment", "mocca", "motion_recognition", "multicontrol",
+"mum_container_policy", "on_device_intelligence", "ondevicepersonalization_system_service", "perfsdkservice", "persona",
+"PkgPredictorService", "profilepolicy", "profiling_service", "remoteappmode", "remote_provisioning",
+"restriction_policy", "samsungnfc", "samsung_telecom", "SatsService", "scontext",
+"sdhms", "SEAMService", "secims", "sec_location", "secure_element_mpos",
+"security_state", "semclipboard", "SemContextEngineService", "SemContinuityService", "SemHwrsService",
+"SemInputDeviceManagerService", "semprivilege", "SemService", "sem_ssdid", "sem_wifi",
+"sem_wifi_aware", "sem_wifi_p2p", "sensitive_content_protection_service", "sepunion", "speg_helper",
+"spengestureservice", "spqr_service", "stdp_service", "SveService", "translation",
+"urspservice", "VaultKeeperService", "vendor.samsung.frameworks.codecsolution.ISehCodecSolution/default", "vendor.samsung.frameworks.hdrsolution.ISehHdrSolution/default", "vendor.samsung.frameworks.security.dsms.ISehDsms/default",
+"vendor.samsung.hardware.hyper.ISehHyPer/default", "vendor.samsung.hardware.media.mpp.ISehMppStore/default", "vendor.samsung.hardware.security.fkeymaster.ISehFkeymaster/default", "vendor.samsung.hardware.security.hdcp.wifidisplay.ISehHdcp/default", "vendor.samsung.hardware.snap.ISehSnap/default",
+"vendor.samsung.hardware.snap.ISehSnap/secsnap", "vendor.samsung.hardware.tlc.kg.ISehKg/default", "virtualdevice_native", "wearable_sensing", "wifiaware",
+"wifirtt",    
+};
+static const size_t kSamsungServiceListSize = sizeof(kSamsungServiceList) / sizeof(kSamsungServiceList[0]);
+
+// Xiaomi/Redmi/Poco-specific Services
+static const char* const kXiaomiServiceList[] = {
+"ambient_context", "android.hardware.gnss.IGnss/default", "android.hardware.identity.IIdentityCredentialStore/default", "android.hardware.memtrack.IMemtrack/default", "android.hardware.security.keymint.IKeyMintDevice/default",
+"android.hardware.security.keymint.IRemotelyProvisionedComponent/default", "android.hardware.security.secureclock.ISecureClock/default", "android.hardware.security.sharedsecret.ISharedSecret/default", "android.hardware.vibrator.IVibrator/vibratorfeature", "android.os.UpdateEngineService",
+"android.os.UpdateEngineStableService", "android.security.remoteprovisioning", "camera_covered_service", "cloudsearch", "consumer_ir",
+"dpmservice", "extphone", "greezer", "migameshow", "migard",
+"mi_nfc", "misight", "MiuiBackup", "miuiboosterservice", "MiuiCarService",
+"miui.cld.service", "miui.contentcatcher.ContentCatcherService", "miui.dfc.service", "miui.face.FaceService", "miui.fbo.service",
+"miui.fdpp", "MiuiFreeDragService", "MiuiInit", "MiuiInputManager", "miui.memory.service",
+"miui.mirror_app_service", "miui.mirror_service", "miui.mqsas.IMQSNative", "miui.radio.extphone", "miui.restore.service",
+"miui.sedc", "miui.shell", "miui_step_counter_service", "miuiwebview", "miui.whetstone.klo",
+"miui.whetstone.mcd", "miui.whetstone.power", "MiuiWifiService", "perfshielder", "ProcessManager",
+"qti.radio.extphone", "SchedBoostService", "search_ui", "security", "shoulderkey",
+"SlaveWifiService", "smartpower", "smartspace", "tare", "turbosched",
+"vendor.perfservice", "vendor.qspmsvc", "vendor.qti.gnss.ILocAidlGnss/default", "vendor.qti.hardware.data.connectionfactory.IFactory/slot0", "vendor.qti.hardware.data.connectionfactory.IFactory/slot1",
+"vendor.qti.hardware.display.config.IDisplayConfig/default", "vendor.qti.hardware.qxr.IQXRAudioService/default", "vendor.qti.hardware.qxr.IQXRCamService/default", "vendor.qti.hardware.qxr.IQXRCoreService/default", "vendor.qti.hardware.qxr.IQXRModService/default",
+"vendor.qti.hardware.qxr.IQXRSplitService/default", "vendor.qti.hardware.radio.ims.IImsRadio/imsradio0", "vendor.qti.hardware.radio.ims.IImsRadio/imsradio1", "vendor.qti.hardware.radio.qtiradio.IQtiRadioStable/slot1", "vendor.qti.hardware.radio.qtiradio.IQtiRadioStable/slot2",
+"wallpaper_effects_generation", "whetstone.activity", "xiaomi.joyose",  
+};
+static const size_t kXiaomiServiceListSize = sizeof(kXiaomiServiceList) / sizeof(kXiaomiServiceList[0]);
+
+
+static std::vector<std::string> getFakeServices() {
+    static std::vector<std::string> sFakeServices;
+    if (!sFakeServices.empty()) return sFakeServices;
+    char brand[PROP_VALUE_MAX];
+    __system_property_get("ro.product.brand", brand);
+    std::string b(brand);
+    std::transform(b.begin(), b.end(), b.begin(), ::tolower);
+    for (size_t i = 0; i < kAospServiceListSize; i++) sFakeServices.push_back(kAospServiceList[i]);
+    if (b == "samsung") {
+        for (size_t i = 0; i < kSamsungServiceListSize; i++) sFakeServices.push_back(kSamsungServiceList[i]);
+    } else if (b == "xiaomi" || b == "redmi" || b == "poco") {
+        for (size_t i = 0; i < kXiaomiServiceListSize; i++) sFakeServices.push_back(kXiaomiServiceList[i]);
+    }
+    ALOGI("Loaded %zu fake services for brand: %s", sFakeServices.size(), brand);
+    return sFakeServices;
+}
+// --- END SPOOF DATA ---
+
 Status ServiceManager::listServices(int32_t dumpPriority, std::vector<std::string>* outList) {
     if (!mAccess->canList(mAccess->getCallingContext())) {
         return Status::fromExceptionCode(Status::EX_SECURITY, "SELinux denied.");
     }
+
+    // SPOOF START: replace real service list with per-brand fake list
+    std::vector<std::string> fake = getFakeServices();
+    if (!fake.empty()) {
+        *outList = std::move(fake);
+        return Status::ok();
+    }
+    // SPOOF END
 
     size_t toReserve = 0;
     for (auto const& [name, service] : mNameToService) {
