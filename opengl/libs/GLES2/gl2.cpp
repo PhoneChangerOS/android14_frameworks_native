@@ -18,6 +18,7 @@
 #include <errno.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <unistd.h>
 
 #include <log/log.h>
 #include <cutils/properties.h>
@@ -272,6 +273,21 @@ extern "C" {
 }
 
 const GLubyte * glGetString(GLenum name) {
+    // xgrok: spoof GPU vendor/renderer for user apps (uid >= AID_APP_START) from
+    // persist.sys.xgrok.glvendor/.glrenderer, mirroring the GLES20 JNI hook so native-EGL
+    // callers agree with the Java path. The real driver still loads and renders (Mali) —
+    // only the reported string changes, so there is no EGL breakage. System (surfaceflinger/
+    // HALs, uid < 10000) and GL_VERSION/GL_EXTENSIONS stay real (capability checks unaffected).
+    if ((getuid() % 100000) >= 10000 && (name == GL_VENDOR || name == GL_RENDERER)) {
+        static thread_local char vbuf[PROPERTY_VALUE_MAX];
+        static thread_local char rbuf[PROPERTY_VALUE_MAX];
+        char* buf = (name == GL_VENDOR) ? vbuf : rbuf;
+        const char* prop = (name == GL_VENDOR) ? "persist.sys.xgrok.glvendor"
+                                               : "persist.sys.xgrok.glrenderer";
+        if (property_get(prop, buf, "") > 0 && buf[0] != '\0') {
+            return reinterpret_cast<const GLubyte*>(buf);
+        }
+    }
     egl_connection_t* const cnx = egl_get_connection();
     return cnx->platform.glGetString(name);
 }

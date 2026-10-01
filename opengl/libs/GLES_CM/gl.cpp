@@ -18,6 +18,7 @@
 #include <errno.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <unistd.h>
 
 #include <log/log.h>
 #include <cutils/properties.h>
@@ -318,6 +319,18 @@ extern "C" {
 extern "C" const GLubyte * __glGetString(GLenum name);
 
 const GLubyte * glGetString(GLenum name) {
+    // xgrok: spoof GPU vendor/renderer for user apps (same as GLES2/gl2.cpp) — string only,
+    // the real driver still renders; system (uid < 10000) and other names stay real.
+    if ((getuid() % 100000) >= 10000 && (name == GL_VENDOR || name == GL_RENDERER)) {
+        static thread_local char vbuf[PROPERTY_VALUE_MAX];
+        static thread_local char rbuf[PROPERTY_VALUE_MAX];
+        char* buf = (name == GL_VENDOR) ? vbuf : rbuf;
+        const char* prop = (name == GL_VENDOR) ? "persist.sys.xgrok.glvendor"
+                                               : "persist.sys.xgrok.glrenderer";
+        if (property_get(prop, buf, "") > 0 && buf[0] != '\0') {
+            return reinterpret_cast<const GLubyte*>(buf);
+        }
+    }
     const GLubyte * ret = egl_get_string_for_current_context(name);
     if (ret == NULL) {
         gl_hooks_t::gl_t const * const _c = &getGlThreadSpecific()->gl;
