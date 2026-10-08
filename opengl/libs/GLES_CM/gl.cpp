@@ -15,6 +15,7 @@
  */
 
 #include <ctype.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -318,10 +319,27 @@ extern "C" {
 
 extern "C" const GLubyte * __glGetString(GLenum name);
 
+// xgrok: renderer callers (platform libs, Chromium/WebView) keep the real strings so their
+// driver-bug workarounds match the real GPU — same rule as GLES2/gl2.cpp.
+static bool xgrokCallerIsRenderer(const void* ra) {
+    Dl_info info;
+    if (ra == nullptr || dladdr(ra, &info) == 0 || info.dli_fname == nullptr) return false;
+    const char* f = info.dli_fname;
+    static const char* const kPlatformDirs[] = {
+        "/system/", "/system_ext/", "/product/", "/vendor/", "/odm/", "/apex/",
+    };
+    for (const char* dir : kPlatformDirs) {
+        if (strncmp(f, dir, strlen(dir)) == 0) return true;
+    }
+    return strstr(f, "libmonochrome") != nullptr || strstr(f, "libwebviewchromium") != nullptr ||
+           strstr(f, "libchrome") != nullptr;
+}
+
 const GLubyte * glGetString(GLenum name) {
     // xgrok: spoof GPU vendor/renderer for user apps (same as GLES2/gl2.cpp) — string only,
     // the real driver still renders; system (uid < 10000) and other names stay real.
-    if ((getuid() % 100000) >= 10000 && (name == GL_VENDOR || name == GL_RENDERER)) {
+    if ((getuid() % 100000) >= 10000 && (name == GL_VENDOR || name == GL_RENDERER) &&
+        !xgrokCallerIsRenderer(__builtin_return_address(0))) {
         static thread_local char vbuf[PROPERTY_VALUE_MAX];
         static thread_local char rbuf[PROPERTY_VALUE_MAX];
         char* buf = (name == GL_VENDOR) ? vbuf : rbuf;

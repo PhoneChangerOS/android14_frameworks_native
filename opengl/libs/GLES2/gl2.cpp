@@ -15,6 +15,7 @@
  */
 
 #include <ctype.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -272,13 +273,36 @@ extern "C" {
     void __glGetInteger64v(GLenum pname, GLint64 * data);
 }
 
+// xgrok: true when glGetString was called by a GPU *renderer* rather than by app code.
+// Renderers pick driver-bug workarounds from GL_VENDOR/GL_RENDERER, so a spoofed vendor
+// (e.g. PowerVR on a real Adreno) makes them emit shaders the real driver rejects —
+// WebView/Chromium Skia then draws nothing (black Google sign-in: "'noperspective' :
+// Reserved word"). Exempt: platform libraries (hwui/Skia; the GLES20/GLImpl JNI already
+// spoofs before reaching here) and Chromium/WebView, which renders inside the host app's
+// uid. App code (/data/app libs, detectors) still gets the spoofed strings.
+static bool xgrokCallerIsRenderer(const void* ra) {
+    Dl_info info;
+    if (ra == nullptr || dladdr(ra, &info) == 0 || info.dli_fname == nullptr) return false;
+    const char* f = info.dli_fname;
+    static const char* const kPlatformDirs[] = {
+        "/system/", "/system_ext/", "/product/", "/vendor/", "/odm/", "/apex/",
+    };
+    for (const char* dir : kPlatformDirs) {
+        if (strncmp(f, dir, strlen(dir)) == 0) return true;
+    }
+    return strstr(f, "libmonochrome") != nullptr || strstr(f, "libwebviewchromium") != nullptr ||
+           strstr(f, "libchrome") != nullptr;
+}
+
 const GLubyte * glGetString(GLenum name) {
     // xgrok: spoof GPU vendor/renderer for user apps (uid >= AID_APP_START) from
     // persist.sys.xgrok.glvendor/.glrenderer, mirroring the GLES20 JNI hook so native-EGL
     // callers agree with the Java path. The real driver still loads and renders (Mali) —
     // only the reported string changes, so there is no EGL breakage. System (surfaceflinger/
     // HALs, uid < 10000) and GL_VERSION/GL_EXTENSIONS stay real (capability checks unaffected).
-    if ((getuid() % 100000) >= 10000 && (name == GL_VENDOR || name == GL_RENDERER)) {
+    // Renderers inside the app process (WebView, hwui) keep the real strings, see above.
+    if ((getuid() % 100000) >= 10000 && (name == GL_VENDOR || name == GL_RENDERER) &&
+        !xgrokCallerIsRenderer(__builtin_return_address(0))) {
         static thread_local char vbuf[PROPERTY_VALUE_MAX];
         static thread_local char rbuf[PROPERTY_VALUE_MAX];
         char* buf = (name == GL_VENDOR) ? vbuf : rbuf;
