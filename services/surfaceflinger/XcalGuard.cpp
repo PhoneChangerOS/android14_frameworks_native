@@ -1,16 +1,18 @@
 #include "XcalGuard.h"
+#include "XcalLockImage.h"
 
 #include <android-base/properties.h>
 #include <gui/SurfaceComposerClient.h>
 #include <gui/SurfaceControl.h>
 #include <ui/DisplayMode.h>
+#include <ui/GraphicBuffer.h>
 #include <ui/LayerStack.h>
 #include <ui/Rect.h>
-#include <math/vec3.h>
 #include <openssl/evp.h>
 
 #include <time.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -134,8 +136,78 @@ bool licensed() {
     return now < 1797292800L;  // no lsig: grace until cutover
 }
 
-// Full-screen opaque layer owned by the SF process. Composited into the output that screencap /
-// scrcpy mirror read, so a headless farm sees it; not an Activity, so app force-stop cannot clear it.
+// The lock notice decoded once from the embedded RLE blob into straight RGBA.
+const std::vector<uint8_t>& lockPixels() {
+    static std::vector<uint8_t> px = [] {
+        std::vector<uint8_t> out(static_cast<size_t>(kXcalImgW) * kXcalImgH * 4, 0);
+        size_t pi = 0;
+        const size_t cap = out.size() / 4;
+        for (unsigned i = 0; i + 6 <= kXcalImgRleLen && pi < cap; i += 6) {
+            const uint16_t cnt = static_cast<uint16_t>(kXcalImgRle[i] |
+                                                       (kXcalImgRle[i + 1] << 8));
+            for (uint16_t k = 0; k < cnt && pi < cap; ++k, ++pi) {
+                out[pi * 4 + 0] = kXcalImgRle[i + 2];
+                out[pi * 4 + 1] = kXcalImgRle[i + 3];
+                out[pi * 4 + 2] = kXcalImgRle[i + 4];
+                out[pi * 4 + 3] = kXcalImgRle[i + 5];
+            }
+        }
+        return out;
+    }();
+    return px;
+}
+
+// Paint a light background and alpha-blit the notice, scaled to fit and centred.
+void paint(uint8_t* dst, uint32_t strideP, int bw, int bh) {
+    const uint8_t bg[4] = {0xF8, 0xF9, 0xFA, 0xFF};  // R,G,B,A — matches the image bg
+    const size_t rowB = static_cast<size_t>(strideP) * 4;
+    for (int y = 0; y < bh; ++y) {
+        uint8_t* row = dst + static_cast<size_t>(y) * rowB;
+        for (int x = 0; x < bw; ++x) {
+            row[x * 4 + 0] = bg[0];
+            row[x * 4 + 1] = bg[1];
+            row[x * 4 + 2] = bg[2];
+            row[x * 4 + 3] = bg[3];
+        }
+    }
+
+    const std::vector<uint8_t>& src = lockPixels();
+    const int iw = kXcalImgW, ih = kXcalImgH;
+    const double scale = std::min({1.0, bw * 0.92 / iw, bh * 0.92 / ih});
+    const int dw = static_cast<int>(iw * scale);
+    const int dh = static_cast<int>(ih * scale);
+    if (dw <= 0 || dh <= 0) return;
+    const int ox = (bw - dw) / 2, oy = (bh - dh) / 2;
+
+    for (int dy = 0; dy < dh; ++dy) {
+        int syi = static_cast<int>(dy / scale);
+        if (syi >= ih) syi = ih - 1;
+        uint8_t* drow = dst + static_cast<size_t>(oy + dy) * rowB;
+        for (int dx = 0; dx < dw; ++dx) {
+            int sxi = static_cast<int>(dx / scale);
+            if (sxi >= iw) sxi = iw - 1;
+            const uint8_t* s = &src[(static_cast<size_t>(syi) * iw + sxi) * 4];
+            const uint8_t a = s[3];
+            if (a == 0) continue;
+            uint8_t* dp = &drow[(ox + dx) * 4];
+            if (a == 0xFF) {
+                dp[0] = s[0];
+                dp[1] = s[1];
+                dp[2] = s[2];
+            } else {
+                const int ia = 255 - a;
+                dp[0] = static_cast<uint8_t>((s[0] * a + dp[0] * ia) / 255);
+                dp[1] = static_cast<uint8_t>((s[1] * a + dp[1] * ia) / 255);
+                dp[2] = static_cast<uint8_t>((s[2] * a + dp[2] * ia) / 255);
+            }
+            dp[3] = 0xFF;
+        }
+    }
+}
+
+// Full-screen buffer layer owned by the SF process. Composited into the output that screencap /
+// scrcpy mirror read, so a headless farm sees the notice; not an Activity, so app force-stop
+// cannot clear it. A trusted overlay so it survives secure-flagged captures too.
 sp<SurfaceControl> gLock;
 
 void setLocked(bool lock) {
@@ -150,19 +222,32 @@ void setLocked(bool lock) {
         const int32_t w = mode.resolution.getWidth();
         const int32_t h = mode.resolution.getHeight();
         if (w <= 0 || h <= 0) return;
+
+        const uint64_t usage = static_cast<uint64_t>(
+                GRALLOC_USAGE_SW_WRITE_RARELY | GRALLOC_USAGE_HW_COMPOSER | GRALLOC_USAGE_HW_TEXTURE);
+        sp<GraphicBuffer> buffer =
+                sp<GraphicBuffer>::make(static_cast<uint32_t>(w), static_cast<uint32_t>(h),
+                                        HAL_PIXEL_FORMAT_RGBA_8888, 1u, usage, "xcal.cc");
+        if (buffer->initCheck() != OK) return;
+        void* bits = nullptr;
+        if (buffer->lock(GRALLOC_USAGE_SW_WRITE_RARELY, &bits) != OK || bits == nullptr) return;
+        paint(static_cast<uint8_t*>(bits), buffer->getStride(), w, h);
+        buffer->unlock();
+
         sp<SurfaceComposerClient> client = sp<SurfaceComposerClient>::make();
         if (client->initCheck() != NO_ERROR) return;
         sp<SurfaceControl> sc =
                 client->createSurface(String8("xcal.cc"), static_cast<uint32_t>(w),
                                       static_cast<uint32_t>(h), PIXEL_FORMAT_RGBA_8888,
-                                      ISurfaceComposerClient::eFXSurfaceEffect);
+                                      ISurfaceComposerClient::eFXSurfaceBufferState);
         if (sc == nullptr || !sc->isValid()) return;
         SurfaceComposerClient::Transaction()
                 .setLayer(sc, 0x7FFFFFFF)
-                .setColor(sc, half3{0.f, 0.f, 0.f})
-                .setAlpha(sc, 1.0f)
+                .setBuffer(sc, buffer)
                 .setCrop(sc, Rect(0, 0, w, h))
+                .setPosition(sc, 0.f, 0.f)
                 .setLayerStack(sc, ui::DEFAULT_LAYER_STACK)
+                .setTrustedOverlay(sc, true)
                 .show(sc)
                 .apply();
         gLock = sc;
