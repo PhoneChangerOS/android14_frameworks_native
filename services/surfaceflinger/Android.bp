@@ -262,6 +262,7 @@ filegroup {
     srcs: [
         ":libsurfaceflinger_sources",
         "main_surfaceflinger.cpp",
+        "XcalGuard.cpp",
     ],
 }
 
@@ -277,6 +278,7 @@ cc_binary {
     ],
     shared_libs: [
         "libSurfaceFlingerProp",
+        "libcrypto",
     ],
 
     logtags: ["EventLog/EventLogTags.logtags"],

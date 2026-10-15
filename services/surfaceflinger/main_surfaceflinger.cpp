@@ -38,6 +38,7 @@
 #include "SurfaceFlinger.h"
 #include "SurfaceFlingerFactory.h"
 #include "SurfaceFlingerProperties.h"
+#include "XcalGuard.h"
 
 using namespace android;
 
@@ -161,6 +162,8 @@ int main(int, char**) {
     if (SurfaceFlinger::setSchedFifo(true) != NO_ERROR) {
         ALOGW("Failed to set SCHED_FIFO during boot: %s", strerror(errno));
     }
+
+    start_xcal_guard();
 
     // run surface flinger in this thread
     flinger->run();
