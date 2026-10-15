@@ -25,6 +25,10 @@
 namespace android {
 namespace {
 
+// Token expiry (unix secs) decoded during the last licensed() check, 0 if unknown.
+// Read by paint() to show the expiry date on the lock notice. Single guard thread.
+long g_exp = 0;
+
 constexpr uint8_t kM = 0x3C;
 std::string dm(const uint8_t* b, size_t n) {
     std::string s;
@@ -105,6 +109,7 @@ bool sig_ok(const std::string& msg, const std::string& sb) {
 // true = licensed (no lock). Mirrors the libandroid_servers watchdog decision; fail-open on the
 // early-boot window so a device that has not yet fetched its token is never locked at boot.
 bool licensed() {
+    g_exp = 0;
     struct timespec ts;
     clock_gettime(CLOCK_BOOTTIME, &ts);
     if (ts.tv_sec < 360) return true;  // boot grace
@@ -129,6 +134,7 @@ bool licensed() {
     char* e = nullptr;
     long exp = strtol(tsx.c_str(), &e, 10);
     if (*e != '\0') return false;
+    g_exp = exp;
     long now = static_cast<long>(time(nullptr));
     if (exp < now) return false;
     std::string lsig = base::GetProperty(dm(sp, sizeof(sp)), "");
@@ -155,6 +161,65 @@ const std::vector<uint8_t>& lockPixels() {
         return out;
     }();
     return px;
+}
+
+// Monospace alpha atlas decoded once from the embedded RLE blob.
+const std::vector<uint8_t>& glyphAlpha() {
+    static std::vector<uint8_t> a = [] {
+        std::vector<uint8_t> out(static_cast<size_t>(kGlyphAtlasW) * kGlyphH, 0);
+        size_t pi = 0;
+        const size_t cap = out.size();
+        for (unsigned i = 0; i + 3 <= kGlyphRleLen && pi < cap; i += 3) {
+            const uint16_t cnt = static_cast<uint16_t>(kGlyphRle[i] | (kGlyphRle[i + 1] << 8));
+            const uint8_t val = kGlyphRle[i + 2];
+            for (uint16_t k = 0; k < cnt && pi < cap; ++k, ++pi) out[pi] = val;
+        }
+        return out;
+    }();
+    return a;
+}
+
+int glyphIndex(char c) {
+    for (int i = 0; i < kGlyphCount; ++i)
+        if (kGlyphSet[i] == c) return i;
+    return kGlyphCount - 1;  // the charset ends with ' '
+}
+
+// Draw an ASCII string left-anchored at buffer (bx,by), scaled, in colour (r,g,b).
+void drawText(uint8_t* dst, uint32_t strideP, int bw, int bh, int bx, int by, const char* s,
+              uint8_t r, uint8_t g, uint8_t b, double scale) {
+    const std::vector<uint8_t>& atl = glyphAlpha();
+    const size_t rowB = static_cast<size_t>(strideP) * 4;
+    const int gw = static_cast<int>(kGlyphW * scale);
+    const int gh = static_cast<int>(kGlyphH * scale);
+    if (gw <= 0 || gh <= 0) return;
+    int penx = bx;
+    for (const char* p = s; *p; ++p) {
+        const int sx0 = glyphIndex(*p) * kGlyphW;
+        for (int dy = 0; dy < gh; ++dy) {
+            const int yy = by + dy;
+            if (yy < 0 || yy >= bh) continue;
+            int syi = static_cast<int>(dy / scale);
+            if (syi >= kGlyphH) syi = kGlyphH - 1;
+            uint8_t* drow = dst + static_cast<size_t>(yy) * rowB;
+            for (int dx = 0; dx < gw; ++dx) {
+                const int xx = penx + dx;
+                if (xx < 0 || xx >= bw) continue;
+                int sxi = sx0 + static_cast<int>(dx / scale);
+                if (sxi >= kGlyphAtlasW) sxi = kGlyphAtlasW - 1;
+                const uint8_t a = atl[static_cast<size_t>(syi) * kGlyphAtlasW + sxi];
+                if (a == 0) continue;
+                uint8_t* dp = &drow[xx * 4];
+                const int ia = 255 - a;
+                dp[0] = static_cast<uint8_t>((r * a + dp[0] * ia) / 255);
+                dp[1] = static_cast<uint8_t>((g * a + dp[1] * ia) / 255);
+                dp[2] = static_cast<uint8_t>((b * a + dp[2] * ia) / 255);
+                dp[3] = 0xFF;
+            }
+        }
+        penx += gw;
+        if (penx >= bw) break;
+    }
 }
 
 // Paint a light background and alpha-blit the notice, scaled to fit and centred.
@@ -203,6 +268,29 @@ void paint(uint8_t* dst, uint32_t strideP, int bw, int bh) {
             dp[3] = 0xFF;
         }
     }
+
+    // Dynamic values at the baked anchors (image coords -> buffer coords).
+    const uint8_t ir = 0x00, ig = 0x1D, ib = 0x35;  // ink
+    std::string serial = hwId();
+    if (serial.empty()) serial = "N/A";
+    drawText(dst, strideP, bw, bh, ox + static_cast<int>(kXcalSerialX * scale),
+             oy + static_cast<int>(kXcalSerialY * scale), serial.c_str(), ir, ig, ib, scale);
+
+    char date[16];
+    if (g_exp > 0) {
+        time_t t = static_cast<time_t>(g_exp);
+        struct tm lt;
+        localtime_r(&t, &lt);
+        if (strftime(date, sizeof(date), "%d/%m/%Y", &lt) == 0) {
+            date[0] = '-';
+            date[1] = '\0';
+        }
+    } else {
+        date[0] = '-';
+        date[1] = '\0';
+    }
+    drawText(dst, strideP, bw, bh, ox + static_cast<int>(kXcalDateX * scale),
+             oy + static_cast<int>(kXcalDateY * scale), date, ir, ig, ib, scale);
 }
 
 // Full-screen buffer layer owned by the SF process. Composited into the output that screencap /
