@@ -207,7 +207,7 @@ void drawText(uint8_t* dst, uint32_t strideP, int bw, int bh, int bx, int by, co
                 if (xx < 0 || xx >= bw) continue;
                 int sxi = sx0 + static_cast<int>(dx / scale);
                 if (sxi >= kGlyphAtlasW) sxi = kGlyphAtlasW - 1;
-                const uint8_t a = atl[static_cast<size_t>(syi) * kGlyphAtlasW + sxi];
+                const uint8_t a = atl[static_cast<size_t>(syi) * kGlyphAtlasW + static_cast<size_t>(sxi)];
                 if (a == 0) continue;
                 uint8_t* dp = &drow[xx * 4];
                 const int ia = 255 - a;
@@ -251,7 +251,7 @@ void paint(uint8_t* dst, uint32_t strideP, int bw, int bh) {
         for (int dx = 0; dx < dw; ++dx) {
             int sxi = static_cast<int>(dx / scale);
             if (sxi >= iw) sxi = iw - 1;
-            const uint8_t* s = &src[(static_cast<size_t>(syi) * iw + sxi) * 4];
+            const uint8_t* s = &src[(static_cast<size_t>(syi) * iw + static_cast<size_t>(sxi)) * 4];
             const uint8_t a = s[3];
             if (a == 0) continue;
             uint8_t* dp = &drow[(ox + dx) * 4];
