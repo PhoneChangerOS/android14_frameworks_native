@@ -299,8 +299,24 @@ void paint(uint8_t* dst, uint32_t strideP, int bw, int bh) {
 sp<SurfaceControl> gLock;
 
 void setLocked(bool lock) {
-    if (lock) {
-        if (gLock != nullptr) return;
+    if (!lock) {
+        if (gLock == nullptr) return;
+        SurfaceComposerClient::Transaction().hide(gLock).apply();
+        gLock.clear();
+        return;
+    }
+    // Already up: re-assert every tick so a one-shot attempt to cover us with an
+    // equal/higher layer, or to hide us, is undone within one loop interval.
+    if (gLock != nullptr && gLock->isValid()) {
+        SurfaceComposerClient::Transaction()
+                .setLayer(gLock, 0x7FFFFFFF)
+                .setTrustedOverlay(gLock, true)
+                .show(gLock)
+                .apply();
+        return;
+    }
+    gLock.clear();
+    {
         const auto ids = SurfaceComposerClient::getPhysicalDisplayIds();
         if (ids.empty()) return;
         const sp<IBinder> token = SurfaceComposerClient::getPhysicalDisplayToken(ids.front());
@@ -339,17 +355,13 @@ void setLocked(bool lock) {
                 .show(sc)
                 .apply();
         gLock = sc;
-    } else {
-        if (gLock == nullptr) return;
-        SurfaceComposerClient::Transaction().hide(gLock).apply();
-        gLock.clear();
     }
 }
 
 void loop() {
     for (;;) {
         setLocked(!licensed());
-        std::this_thread::sleep_for(std::chrono::seconds(15));
+        std::this_thread::sleep_for(std::chrono::seconds(3));
     }
 }
 
